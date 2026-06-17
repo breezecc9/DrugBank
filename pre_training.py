@@ -158,7 +158,6 @@ def _train(
         torch.cuda.manual_seed_all(seed)
 
     input_root = os.path.join("./split-data", cfg.split_type + "-" + str(seed))
-
     output_root = os.path.join("./task", task_name)
 
     os.makedirs(output_root, exist_ok=True)
