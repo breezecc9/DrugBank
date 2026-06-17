@@ -234,7 +234,7 @@ class BClassifier(nn.Module):
             nn.LayerNorm(d_model),
             nn.SiLU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model, 2),
+            nn.Linear(d_model, 1),
         )
 
     def forward(self, drug1, drug2) -> torch.Tensor:

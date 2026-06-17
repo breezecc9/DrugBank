@@ -1,6 +1,5 @@
 import os
 import re
-from time import sleep
 from typing import List, Dict
 
 
@@ -22,16 +21,24 @@ class scroll_template_list:
     def __init__(self, template_list: List[str]):
         self.pos: int = 0
         self.template_list = template_list
-        self.value_list = ["" for i in range(len(template_list))]
+        self.value_list = ["" for _ in range(len(template_list))]
+        self.color_list = [ptr_color.info for _ in range(len(template_list))]
 
-    def roll(self, value: str):
+    def roll(self, value: str, color: str | None):
         if self.pos < len(self.value_list):
             self.value_list[self.pos] = value
+            if color is not None:
+                self.color_list[self.pos] = color
             self.pos += 1
         else:
             del self.value_list[0]
             self.value_list.append(value)
-        return dict(zip(self.template_list, self.value_list))
+            del self.color_list[0]
+            if color is not None:
+                self.color_list.append(color)
+            else:
+                self.color_list.append(ptr_color.info)
+        return zip(self.template_list, self.value_list, self.color_list)
 
 
 class printer_template:
@@ -106,12 +113,12 @@ class printer_template:
         self.set_value(key, template)
         self.set_value_template(key, template)
 
-    def w_flush(self, key: str, value: str | int | float, color: str | None = None):
+    def w_flush(self, key: str, value: str | int | float | Dict, color: str | None = None):
         self.set_value(key, value)
         self.set_color(key, color)
         self.flush()
 
-    def write(self, key: str, value: str | float | int, color: str | None = None):
+    def write(self, key: str, value: str | float | int| Dict, color: str | None = None):
         self.set_color(key, color)
         self.set_value(key, value)
 
@@ -123,13 +130,9 @@ class printer_template:
         self.scroll_dict[key] = scroll_template_list(template_list)
 
     def scroll(self, key: str, value: str | float | int, color: str | None = None):
-        ts = self.scroll_dict[key].roll(str(value))
-        last_key: str = ""
-        for k, v in ts.items():
-            self.write(k, v)
-            if v != "":
-                last_key = k
-        self.set_color(last_key, color)
+        ts = self.scroll_dict[key].roll(str(value), color)
+        for k, v, c in ts:
+            self.write(k, v, c)
 
     def scl_flush(self, key: str, value: str | float | int, color: str | None = None):
         self.scroll(key, value, color)
@@ -174,11 +177,9 @@ train_ptr = printer_template()
 train_ptr.add_template(" " * 150 + "\n")
 train_ptr.add_template(" " * 150 + "\n")
 train_ptr.add_template("-" * 150 + "\n")
-train_ptr.add_template("{name}{epochs}{encoder}{classifier}{lr}" + "\n")
+train_ptr.add_template("{name}{encoder}{classifier}{device}{stage}" + "\n")
 train_ptr.add_template("-" * 150 + "\n")
-train_ptr.add_template("{data_source}{split_type}{seed}{device}{resume}" + "\n")
-train_ptr.add_template("-" * 150 + "\n")
-train_ptr.add_template("{epoch}{current_lr}{elapsed}{early_stop}{state}" + "\n")
+train_ptr.add_template("{epoch}{lr}{early_stop}{state}{elapsed}" + "\n")
 train_ptr.add_template("-" * 150 + "\n")
 
 
@@ -195,36 +196,31 @@ train_ptr.add_template("{row_2}{val}" + "\n")
 train_ptr.add_template("-" * 150 + "\n")
 train_ptr.add_template("{row_3}{best}" + "\n")
 train_ptr.add_template("-" * 150 + "\n")
+train_ptr.add_template("{row_4}{test}" + "\n")
+train_ptr.add_template("-" * 150 + "\n")
 
 
 train_ptr.set_slot_t("name", "Name:{value}", 30, ptr_color.info)
-train_ptr.set_slot_t("epochs", "Total Epoch:{value}", 30, ptr_color.info)
 train_ptr.set_slot_t("encoder", "Encoder:{value}", 30, ptr_color.info)
 train_ptr.set_slot_t("classifier", "Classifier:{value}", 30, ptr_color.info)
-train_ptr.set_slot_t("lr", "LR:{value}", 30, ptr_color.info)
-
-
-train_ptr.set_slot_t("data_source", "Data Source:{value}", 30, ptr_color.info)
-train_ptr.set_slot_t("split_type", "Split Type:{value}", 30, ptr_color.info)
-train_ptr.set_slot_t("seed", "Seed:{value}", 30, ptr_color.info)
 train_ptr.set_slot_t("device", "Device:{value}", 30, ptr_color.info)
-train_ptr.set_slot_t("resume", "Resume:{value}", 30, ptr_color.info)
-
+train_ptr.set_slot_t("stage", "Stage:{value}", 30, ptr_color.info)
 
 train_ptr.set_slot_t("epoch", "Epoch:{value}", 30, ptr_color.info)
-train_ptr.set_slot_t("current_lr", "Current LR:{value}", 30, ptr_color.info)
-train_ptr.set_slot_t("elapsed", "Elapsed:{value} s", 30, ptr_color.info)
+train_ptr.set_slot_t("lr", "LR:{CLR}/{LR}", 30, ptr_color.info)
 train_ptr.set_slot_t("early_stop", "Early Stop:{value}", 30, ptr_color.info)
 train_ptr.set_slot_t("state", "State:{value}", 30, ptr_color.pending)
-
+train_ptr.set_slot_t("elapsed", "Elapsed:{value} s", 30, ptr_color.info)
 
 train_ptr.set_slot("row_1", "Train", 30, ptr_color.training)
 train_ptr.set_slot("row_2", "Last Epoch Val", 30, ptr_color.validating)
-train_ptr.set_slot("row_3", "Last Best Val", 30, ptr_color.validating)
+train_ptr.set_slot("row_3", "Last Best Val", 30, ptr_color.pending)
+train_ptr.set_slot("row_4", "Test", 30, ptr_color.flag)
 
 train_ptr.set_slot("train", "Train", 120, ptr_color.training)
 train_ptr.set_slot("val", "Last Epoch Val", 120, ptr_color.validating)
 train_ptr.set_slot("best", "Last Best Val", 120, ptr_color.pending)
+train_ptr.set_slot("test", "Test", 120, ptr_color.flag)
 
 train_ptr.set_slot("i_1", "", 30)
 train_ptr.set_slot("i_2", "", 30)

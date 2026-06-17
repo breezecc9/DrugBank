@@ -1,67 +1,42 @@
 import argparse
 from process_data import split_data
-from test import run_testing,test_all
-from train import run_training, resume_training, train_all
-
+from pre_training import pre_train
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="AttnGIN-DDI: Drug-Drug Interaction Prediction"
-    )
+    parser = argparse.ArgumentParser(description="Drug-Drug Interaction Prediction")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    # ---- train ----
-    p_train = sub.add_parser("train", help="Start a new training run")
-    p_train.add_argument("config", help="Config class name in config.py")
-
-    # ---- train all----
-    p_train_all = sub.add_parser("train_all", help="Queue a training run")
-    p_train_all.add_argument(
-        "configs", nargs="+", help="Config class name(s) in config.py"
+    # ---- pre-train ----
+    p_train = sub.add_parser("pre-train", help="Start one or more pre-training runs")
+    p_train.add_argument(
+        "configs",
+        nargs="+",
+        help="One or more BaseConfig subclass names in the config module",
     )
-
-    # ---- resume ----
-    p_resume = sub.add_parser(
-        "resume", help="Resume a training run that has a checkpoint under checkpoints/"
+    p_train.add_argument(
+        "--run-mode",
+        default="all",
+        choices=["train", "test", "all"],
+        help="Run mode: 'train' (training only), 'test' (testing only), or 'all' (both, default)",
     )
-    p_resume.add_argument("config", help="Config class name in config.py")
+    p_train.set_defaults(func=lambda args: pre_train(args.configs,args.run_mode))
 
-    # ---- test ----
-    p_test = sub.add_parser("test", help="Evaluate a trained model on test set")
-    p_test.add_argument("config", help="Config class name in config.py")
-
-
-    # ---- test all----
-    p_test_all = sub.add_parser("test_all", help="Queue a testing run")
-    p_test_all.add_argument(
-        "configs", nargs="+", help="Config class name(s) in config.py"
-    )
-
-
-
-    # ---- split ----
-    p_split = sub.add_parser("split", help="Split raw data into train/test")
-    p_split.add_argument(
-        "--data-source",
-        default="drugbank",
-        choices=["drugbank", "twosides"],
-        dest="data_source",
-        help="Data source (default: drugbank)",
-    )
+    # ---- split-data ----
+    p_split = sub.add_parser("split", help="Split raw data into train/val/test")
     p_split.add_argument(
         "--split-type",
         default="random",
         choices=["random", "cluster"],
-        dest="split_type",
         help="Split strategy (default: random)",
     )
     p_split.add_argument(
-        "--train-size",
+        "--ratio-tuple",
         type=float,
-        default=0.8,
-        dest="train_size",
-        help="Training set ratio (default: 0.8)",
+        nargs=3,
+        default=(0.7, 0.1, 0.2),
+        metavar=("TRAIN", "VAL", "TEST"),
+        help="split ratio for train/val/test (default: 0.7 0.1 0.2)",
     )
     p_split.add_argument(
         "--seed",
@@ -69,26 +44,14 @@ def main():
         default=42,
         help="Random seed (default: 42)",
     )
+    p_split.set_defaults(
+        func=lambda args: split_data(
+            split_type=args.split_type, ratio_tuple=args.ratio_tuple, seed=args.seed
+        )
+    )
 
     args = parser.parse_args()
-
-    if args.command == "train":
-        run_training(config_class_name=args.config)
-    elif args.command == "train_all":
-        train_all(args.configs)
-    elif args.command == "resume":
-        resume_training(config_class_name=args.config)
-    elif args.command == "test":
-        run_testing(config_class_name=args.config)
-    elif args.command == "test_all":
-        test_all(args.configs)
-    elif args.command == "split":
-        split_data(
-            data_source=args.data_source,
-            split_type=args.split_type,
-            train_size=args.train_size,
-            seed=args.seed,
-        )
+    args.func(args)
 
 
 if __name__ == "__main__":

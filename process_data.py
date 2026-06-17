@@ -10,10 +10,6 @@ import torch
 from rdkit import Chem, DataStructs
 from rdkit.Chem import (
     AllChem,
-    Descriptors,
-    rdMolDescriptors,
-    Lipinski,
-    GraphDescriptors,
     ValenceType,
 )
 from rdkit.ML.Cluster import Butina
@@ -71,14 +67,14 @@ class InteractionDataset(Dataset):
         self,
         root,
         type: Literal["train", "val", "test"] = "train",
-        stage: Literal["pre", "ft"] = "pre",
+        stage: Literal["pre-train", "fine-tune"] = "pre-train",
     ):
         super().__init__()
-        cache_key = f"{type}_{stage}_itc.pt"
+        cache_key = f"{type}-{stage}-itc.pt"
         cache_file_path = os.path.join(root, "processed", cache_key)
         if not os.path.exists(cache_file_path):
             os.makedirs(os.path.join(root, "processed"), exist_ok=True)
-            df = pd.read_csv(os.path.join(root, "raw", f"{type}_{stage}_itc.csv"))
+            df = pd.read_csv(os.path.join(root, "raw", f"{type}-{stage}-itc.csv"))
             drug1 = torch.tensor(df["drug1"].values, dtype=torch.long)
             drug2 = torch.tensor(df["drug2"].values, dtype=torch.long)
             label = torch.tensor(df["label"].values, dtype=torch.long)
@@ -97,25 +93,19 @@ class InteractionDataset(Dataset):
 
 
 def split_data(
-    data_source: Literal["drugbank", "twosides"] = "drugbank",
     split_type: Literal["random", "cluster"] = "random",
     ratio_tuple: tuple[float, float, float] = (0.7, 0.1, 0.2),
     seed=42,
 ):
-    save_dir = os.path.join(
-        "./split_data", data_source + "-" + split_type + "-" + str(seed), "raw"
-    )
+    save_dir = os.path.join("./split-data", split_type + "-" + str(seed), "raw")
     os.makedirs(save_dir, exist_ok=True)
-    if data_source == "drugbank":
-        if split_type == "random":
-            _split_drugbank_random(
-                pd.read_csv("./data/drugbank.tab", sep="\t"),
-                ratio_tuple,
-                seed,
-                save_dir,
-            )
-        else:
-            raise TypeError()
+    if split_type == "random":
+        _split_drugbank_random(
+            pd.read_csv("./data/drugbank.tab", sep="\t"),
+            ratio_tuple,
+            seed,
+            save_dir,
+        )
     else:
         raise TypeError()
 
@@ -164,19 +154,19 @@ def _split_drugbank_random(df: pd.DataFrame, ratio_tuple, seed, save_dir):
         index=False,
     )
     itc.to_csv(
-        os.path.join(save_dir, "all_itc.csv"),
+        os.path.join(save_dir, "all-itc.csv"),
         index=False,
     )
     train.to_csv(
-        os.path.join(save_dir, "train_itc.csv"),
+        os.path.join(save_dir, "train-itc.csv"),
         index=False,
     )
     test.to_csv(
-        os.path.join(save_dir, "test_itc.csv"),
+        os.path.join(save_dir, "test-itc.csv"),
         index=False,
     )
     val.to_csv(
-        os.path.join(save_dir, "val_itc.csv"),
+        os.path.join(save_dir, "val-itc.csv"),
         index=False,
     )
 
@@ -416,7 +406,6 @@ def smiles_to_graph(smiles):
     for atom in mol.GetAtoms():
         x.append(_atom_features(atom))
     x = torch.tensor(x, dtype=torch.float)
-    # 分配 CIP 标签（用于手性特征）
     try:
         rdCIPLabeler.AssignCIPLabels(mol)
     except:
@@ -438,89 +427,11 @@ def smiles_to_graph(smiles):
     edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
     edge_attr = torch.tensor(edge_attr, dtype=torch.float)
 
-    # ========== 全局特征 ==========
-    gw = Descriptors.MolWt(mol) / 500.0
-    logp = Descriptors.MolLogP(mol) / 10.0
-    tpsa = Descriptors.TPSA(mol) / 250.0
-    hdonor = Descriptors.NumHDonors(mol) / 10.0
-    haccept = Descriptors.NumHAcceptors(mol) / 10.0
-    rot_bond = Descriptors.NumRotatableBonds(mol) / 20.0
-    ring_num = rdMolDescriptors.CalcNumRings(mol) / 10.0
-
-    # 重原子数
-    heavy_atom = Descriptors.HeavyAtomCount(mol) / 50.0
-    # 芳香环数量
-    aromatic_ring = rdMolDescriptors.CalcNumAromaticRings(mol) / 10.0
-    # 脂肪环数量
-    aliphatic_ring = rdMolDescriptors.CalcNumAliphaticRings(mol) / 10.0
-    # 摩尔折射率
-    mr = Descriptors.MolMR(mol) / 100.0
-    # 分子柔性指数
-    total_bonds = mol.GetNumBonds()
-    frac_rot = Descriptors.NumRotatableBonds(mol) / max(1, total_bonds)
-    # 卤素原子总数
-    halogens = (
-        sum(1 for a in mol.GetAtoms() if a.GetSymbol() in ("F", "Cl", "Br", "I")) / 10.0
-    )
-    # 氧原子数、氮原子数
-    o_count = sum(1 for a in mol.GetAtoms() if a.GetSymbol() == "O") / 10.0
-    n_count = sum(1 for a in mol.GetAtoms() if a.GetSymbol() == "N") / 10.0
-    # 分子复杂度 (BertzCT)
-    complexity = GraphDescriptors.BertzCT(mol) / 1000.0
-    # 不饱和碳原子比例
-    unsaturated_c = len(mol.GetSubstructMatches(Chem.MolFromSmarts("[C]=[C]")))
-    unsat_c_ratio = unsaturated_c / max(1, Descriptors.HeavyAtomCount(mol))
-    # Fsp3 (sp3杂化碳比例)
-    fsp3 = Lipinski.FractionCSP3(mol) if total_bonds > 0 else 0.0
-    # 正/负电荷数
-    pos_charge = sum(1 for a in mol.GetAtoms() if a.GetFormalCharge() > 0) / 5.0
-    neg_charge = sum(1 for a in mol.GetAtoms() if a.GetFormalCharge() < 0) / 5.0
-    # 刚性键比例
-    rigid_bonds = total_bonds - Descriptors.NumRotatableBonds(mol)
-    rigid_ratio = rigid_bonds / max(1, total_bonds)
-    # Kappa 形状指数 (归一化)
-    kappa1 = GraphDescriptors.Kappa1(mol) / 20.0
-    kappa2 = GraphDescriptors.Kappa2(mol) / 20.0
-    kappa3 = GraphDescriptors.Kappa3(mol) / 20.0
-    # Chi 分子连接性指数 (归一化)
-    chi0v = GraphDescriptors.Chi0v(mol) / 10.0
-    chi1v = GraphDescriptors.Chi1v(mol) / 10.0
-    chi2v = GraphDescriptors.Chi2v(mol) / 10.0
-
     gen = Chem.rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=1024)
     fp = gen.GetFingerprint(mol)
-    tensor_fp = torch.tensor(np.array(fp), dtype=torch.float).unsqueeze(0)
-    graph_attr = [
-        gw,
-        logp,
-        tpsa,
-        hdonor,
-        haccept,
-        rot_bond,
-        ring_num,
-        heavy_atom,
-        aromatic_ring,
-        aliphatic_ring,
-        mr,
-        frac_rot,
-        halogens,
-        o_count,
-        n_count,
-        complexity,
-        unsat_c_ratio,
-        fsp3,
-        pos_charge,
-        neg_charge,
-        rigid_ratio,
-        kappa1,
-        kappa2,
-        kappa3,
-        chi0v,
-        chi1v,
-        chi2v,
-    ]
-    graph_attr = torch.tensor(graph_attr, dtype=torch.float).unsqueeze(0)
-    graph_attr = torch.cat([graph_attr, tensor_fp], dim=1)
+
+    graph_attr = torch.tensor(np.array(fp), dtype=torch.float).unsqueeze(0)
+
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, graph_attr=graph_attr)
 
 
@@ -633,7 +544,7 @@ def constrained_sample(
     return sampled_set
 
 
-def fingerprint_balanced_negative_sampling(
+def sample_fp_balanced_neg(
     fp_dict,
     pending_pairs,
     neg_pairs,
@@ -733,15 +644,14 @@ def butina_cluster(id_list: list, fp_dict: dict, dist_threshold=0.6):
     return cluster_labels
 
 
-def random_neg_sampling(neg_pairs_pool: set, num_sample: int, seed: int):
+def sample_random_neg(neg_pairs_pool: set, num_sample: int, seed: int):
     random.seed(seed)
     if num_sample >= len(neg_pairs_pool):
         return set(neg_pairs_pool)
     return set(random.sample(list(neg_pairs_pool), num_sample))
 
 
-def generate_pre_neg_sample(
-    data_source,
+def sample_pre_train_neg(
     split_type,
     seed=42,
     dist_threshold=0.6,
@@ -750,15 +660,13 @@ def generate_pre_neg_sample(
     difficulty_ratio=(0.3, 0.4, 0.3),
     k=0.6,
 ):
-    base_dir = os.path.join(
-        "./split_data", data_source + "-" + split_type + "-" + str(seed), "raw"
-    )
+    base_dir = os.path.join("./split-data", split_type + "-" + str(seed), "raw")
 
     drugs = pd.read_csv(os.path.join(base_dir, "drug.csv"))
-    all_itc = pd.read_csv(os.path.join(base_dir, "all_itc.csv"))
-    train_itc = pd.read_csv(os.path.join(base_dir, "train_itc.csv"))
-    val_itc = pd.read_csv(os.path.join(base_dir, "val_itc.csv"))
-    test_itc = pd.read_csv(os.path.join(base_dir, "test_itc.csv"))
+    all_itc = pd.read_csv(os.path.join(base_dir, "all-itc.csv"))
+    train_itc = pd.read_csv(os.path.join(base_dir, "train-itc.csv"))
+    val_itc = pd.read_csv(os.path.join(base_dir, "val-itc.csv"))
+    test_itc = pd.read_csv(os.path.join(base_dir, "test-itc.csv"))
 
     drug_dict = {i: s for i, s in zip(drugs["id"], drugs["smile"])}
 
@@ -775,7 +683,7 @@ def generate_pre_neg_sample(
     fp_dict = generate_fp(drug_dict)
     fn_filted_neg_pairs = filte_false_neg(fp_dict, all_neg_pairs, sim_threshold)
     cluster_labels = butina_cluster(list(drug_dict.keys()), fp_dict, dist_threshold)
-    train_neg_pairs = fingerprint_balanced_negative_sampling(
+    train_neg_pairs = sample_fp_balanced_neg(
         fp_dict,
         train_pos_pairs,
         fn_filted_neg_pairs,
@@ -786,9 +694,9 @@ def generate_pre_neg_sample(
         seed,
     )
     rest_neg_pairs = fn_filted_neg_pairs - train_neg_pairs
-    val_neg_pairs = random_neg_sampling(rest_neg_pairs, len(val_itc), seed)
+    val_neg_pairs = sample_random_neg(rest_neg_pairs, len(val_itc), seed)
     rest_neg_pairs = rest_neg_pairs - val_neg_pairs
-    test_neg_pairs = random_neg_sampling(rest_neg_pairs, len(test_itc), seed)
+    test_neg_pairs = sample_random_neg(rest_neg_pairs, len(test_itc), seed)
 
     train_neg = pd.DataFrame(
         list(train_neg_pairs),
@@ -812,9 +720,9 @@ def generate_pre_neg_sample(
     train = pd.concat([train_itc, train_neg], axis=0, ignore_index=True)
     val = pd.concat([val_itc, val_neg], axis=0, ignore_index=True)
     test = pd.concat([test_itc, test_neg], axis=0, ignore_index=True)
-    train.to_csv(os.path.join(base_dir, "train_pre_itc.csv"), index=False)
-    val.to_csv(os.path.join(base_dir, "val_pre_itc.csv"), index=False)
-    test.to_csv(os.path.join(base_dir, "test_pre_itc.csv"), index=False)
+    train.to_csv(os.path.join(base_dir, "train-pre-train-itc.csv"), index=False)
+    val.to_csv(os.path.join(base_dir, "val-pre-train-itc.csv"), index=False)
+    test.to_csv(os.path.join(base_dir, "test-pre-train-itc.csv"), index=False)
     print(
         f"数据集生成完成：训练集{len(train)}条，验证集{len(val)}条，测试集{len(test)}条"
     )
@@ -824,4 +732,4 @@ __all__ = ["Timer", "split_data", "itc_collate_fn", "drug_collate_fn"]
 
 if __name__ == "__main__":
     # split_data()
-    generate_pre_neg_sample("drugbank", "random", seed=42)
+    sample_pre_train_neg("random", seed=42)

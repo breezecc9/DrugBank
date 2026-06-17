@@ -10,7 +10,6 @@ wheels/
 .venv/
 
 .vscode/
-checkpoints/
-graph/
-split_data/
+task/
+split-data/
 

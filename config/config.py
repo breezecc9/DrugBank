@@ -3,7 +3,6 @@ from typing import ClassVar, Literal
 
 class BaseConfig:
     _required_fields = {
-        "data_source",
         "split_type",
         "epochs",
         "node_dim",
@@ -22,10 +21,10 @@ class BaseConfig:
         "weight_decay",
         "min_delta",
         "patience",
+        "scaler",
         "num_workers",
     }
     __name__: str
-    data_source: ClassVar[Literal["drugbank", "twosides"]]
     split_type: ClassVar[Literal["random", "cluster"]]
     epochs: ClassVar[int]
     node_dim: ClassVar[int]
@@ -45,6 +44,7 @@ class BaseConfig:
     patience: ClassVar[int]
     min_delta: ClassVar[float]
     num_workers: ClassVar[int]
+    scaler: ClassVar[bool]
 
     @classmethod
     def __init_subclass__(cls):
