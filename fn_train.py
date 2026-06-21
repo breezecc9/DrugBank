@@ -1,6 +1,7 @@
 import os
 import random
-
+from typing import Literal
+import config
 import numpy as np
 import pandas as pd
 from sklearn.metrics import (
@@ -17,7 +18,6 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.nn import CrossEntropyLoss
 from torch.optim import AdamW
 from config import BaseConfig
-import config
 from process_data import (
     DrugDataset,
     InteractionDataset,
@@ -25,6 +25,7 @@ from process_data import (
     itc_collate_fn,
     drug_collate_fn,
 )
+from pretty_printer import pt_printer as ptr, PtrColor
 
 
 def _train_one_epoch(
@@ -40,7 +41,7 @@ def _train_one_epoch(
 
     encoder.train()
     classifier.train()
-
+    total_batch = len(itc_loader)
     total_loss = 0.0
     total_acc = 0.0
     batch_counter = 0
@@ -77,6 +78,16 @@ def _train_one_epoch(
 
         total_loss += loss.item()
         total_acc += acc.item()
+
+        ptr.w_flush(
+            "train",
+            {
+                "batch": f"{batch_counter}/{total_batch}",
+                "loss": f"{loss.item():.5f}",
+                "acc": f"{acc.item():.5f}",
+                "elapsed": "--",
+            },
+        )
     avg_loss = total_loss / len(itc_loader)
     avg_acc = total_acc / len(itc_loader)
     return avg_loss, avg_acc
@@ -130,7 +141,7 @@ def _val_one_epoch(
     return (avg_loss, acc, f1, auc, prec, rec)
 
 
-def train(cfg: BaseConfig):
+def _train(cfg: BaseConfig):
 
     task_name = cfg.__name__
     epochs = cfg.epochs
@@ -143,8 +154,15 @@ def train(cfg: BaseConfig):
     output_root = os.path.join("./task", task_name)
 
     os.makedirs(output_root, exist_ok=True)
+    pre_train_model_path = os.path.join(output_root, "pre-train.pt")
 
-    model_path = os.path.join(output_root, "fine-tuned.pt")
+    if not os.path.exists(pre_train_model_path):
+        ptr.scl_flush(
+            "info", f"Failed to load pre-trained model from: {pre_train_model_path}"
+        )
+        return
+
+    model_path = os.path.join(output_root, "fine-tune.pt")
     ft_res_path = os.path.join(output_root, "fine-tune-metric.csv")
 
     random.seed(seed)
@@ -214,6 +232,11 @@ def train(cfg: BaseConfig):
 
     total_timer = 0
 
+    ptr.write("name", cfg.__name__)
+    ptr.write("stage", "fine-tune")
+    ptr.write("lr", f"{lr:.7f}/{lr:.7f}")
+    ptr.w_flush("device", device)
+
     for epoch in range(0, epochs):
         current_epoch = epoch + 1
 
@@ -231,9 +254,20 @@ def train(cfg: BaseConfig):
         total_timer += timer.elapsed
         result["train_loss"].append(train_loss)
         result["train_acc"].append(train_acc)
-
+        ptr.write(
+            "train",
+            {
+                "batch": "--",
+                "loss": f"{train_loss:.5f}",
+                "acc": f"{train_acc:.5f}",
+                "elapsed": f"{timer.elapsed:.5f}",
+            },
+        )
+        ptr.w_flush(
+            "elapsed",
+            f"{total_timer:.5f}",
+        )
         with Timer() as timer:
-
             val_loss, val_acc, val_f1, val_auc, val_prec, val_rec = _val_one_epoch(
                 encoder,
                 classifier,
@@ -250,11 +284,26 @@ def train(cfg: BaseConfig):
         result["prec"].append(val_prec)
         result["rec"].append(val_rec)
         result["elapsed"].append(total_timer)
-
-
+        ptr.write(
+            "val",
+            {
+                "loss": f"{val_loss:.5f}",
+                "acc": f"{val_acc:.5f}",
+                "f1": f"{val_f1:.5f}",
+                "auc": f"{val_auc:.5f}",
+                "prec": f"{val_prec:.5f}",
+                "rec": f"{val_rec:.5f}",
+                "elapsed": f"{timer.elapsed:.5f}",
+            },
+        )
+        ptr.write(
+            "elapsed",
+            f"{total_timer:.5f}",
+        )
         scheduler.step()
-        is_improved = early_stop(val_auc)
- 
+        is_improved = early_stop(val_f1)
+        ptr.write("state", "waiting", PtrColor.pending)
+        ptr.w_flush("lr", f"{optimizer.param_groups[0]['lr']:.7f}/{lr:.7f}")
         if is_improved:
             torch.save(
                 {
@@ -264,11 +313,155 @@ def train(cfg: BaseConfig):
                 },
                 model_path,
             )
-      
+            ptr.write(
+                "early_stop",
+                f"{early_stop.counter}/{early_stop.patience}",
+                PtrColor.info,
+            )
+            ptr.write(
+                "best",
+                {
+                    "loss": f"{val_loss:.5f}",
+                    "acc": f"{val_acc:.5f}",
+                    "f1": f"{val_f1:.5f}",
+                    "auc": f"{val_auc:.5f}",
+                    "prec": f"{val_prec:.5f}",
+                    "rec": f"{val_rec:.5f}",
+                },
+                PtrColor.pending,
+            )
+            ptr.scroll(
+                "info",
+                f"[Epoch {current_epoch}/{epochs}] new best model saved to {model_path}",
+                PtrColor.flag,
+            )
+            ptr.scl_flush(
+                "info",
+                f"[Epoch {current_epoch}/{epochs}] val metric saved to {ft_res_path}",
+                PtrColor.flag,
+            )
         else:
-            pass
+            ptr.scroll(
+                "info",
+                f"[{current_epoch}/{epochs}] performance not improved",
+                PtrColor.warning,
+            )
+            ptr.w_flush(
+                "early_stop",
+                f"{early_stop.counter}/{early_stop.patience}",
+                PtrColor.warning,
+            )
 
         if early_stop.early_stop:
-
+            ptr.write(
+                "early_stop",
+                f"{early_stop.counter}/{early_stop.patience}",
+                PtrColor.error,
+            )
+            ptr.scroll(
+                "info",
+                f"[{current_epoch}/{epochs}] early stopping triggered",
+                PtrColor.error,
+            )
+            ptr.w_flush("state", "finished", PtrColor.done)
             break
     pd.DataFrame(result).to_csv(ft_res_path, index=False)
+    ptr.scl_flush(
+        "info",
+        f"{task_name} fine-tune already completed",
+        PtrColor.notice,
+    )
+
+
+def _test(cfg: BaseConfig):
+
+    task_name = cfg.__name__
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    root = os.path.join("./split-data", cfg.split_type + "-" + str(cfg.seed))
+
+    drug_set = DrugDataset(root)
+    test_itc = InteractionDataset(root, "test", "fine-tune")
+
+    drug_loader = DataLoader(
+        drug_set,
+        collate_fn=drug_collate_fn,
+        batch_size=cfg.drug_batch_size,
+        num_workers=cfg.num_workers,
+        shuffle=False,
+    )
+    test_loader = DataLoader(
+        test_itc,
+        collate_fn=itc_collate_fn,
+        batch_size=cfg.itc_batch_size,
+        num_workers=cfg.num_workers,
+        shuffle=False,
+    )
+
+    encoder = AttnGINTFEncoder(
+        cfg.node_dim,
+        cfg.edge_dim,
+        cfg.graph_dim,
+        cfg.d_model,
+        cfg.block_num,
+        cfg.dp_r,
+        cfg.heads,
+    ).to(device)
+    classifier = MClassifier(cfg.d_model, class_num=cfg.class_num, dp_r=cfg.dp_r).to(
+        device
+    )
+    criterion = CrossEntropyLoss(label_smoothing=cfg.label_smoothing)
+
+    base_dir = os.path.join("./task", task_name)
+    best_path = os.path.join(base_dir, "fine-tuned.pt")
+    eval_path = os.path.join(base_dir, "fine-tuned-eval.csv")
+
+    ptr.write("name", cfg.__name__)
+    ptr.write("stage", "fine-tune")
+    ptr.write("state", "test", PtrColor.flag)
+    ptr.w_flush("device", device)
+
+    if not os.path.exists(best_path):
+        ptr.w_flush("info", f"best_path: {best_path} not existed")
+        return
+
+    best_model = torch.load(best_path, weights_only=False)
+    ptr.scl_flush("info", f"loaded best model from:{best_path}")
+
+    encoder.load_state_dict(best_model["encoder"])
+    classifier.load_state_dict(best_model["classifier"])
+
+    loss, acc, f1, auc, prec, rec = _val_one_epoch(
+        encoder,
+        classifier,
+        drug_loader,
+        test_loader,
+        criterion,
+        device,
+    )
+    ptr.w_flush(
+        "test",
+        {
+            "loss": f"{loss:.5f}",
+            "acc": f"{acc:.5f}",
+            "f1": f"{f1:.5f}",
+            "auc": f"{auc:.5f}",
+            "prec": f"{prec:.5f}",
+            "rec": f"{rec:.5f}",
+        },
+    )
+    pd.DataFrame(
+        {"loss": loss, "acc": acc, "f1": f1, "auc": auc, "prec": prec, "rec": rec},
+        index=[0],
+    ).to_csv(eval_path, index=False)
+    ptr.scl_flush("info", f"eval data saved to {eval_path}", color=PtrColor.flag)
+
+
+def fine_tune(configs: list[str], mode: Literal["train", "test", "all"]):
+    for cfg in configs:
+        if mode in ("train", "all"):
+            _train(getattr(config, cfg))
+        if mode in ("test", "all"):
+            _test(getattr(config, cfg))
+
+
+__all__ = ["fine_tune"]

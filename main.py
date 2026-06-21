@@ -1,6 +1,7 @@
 import argparse
 from process_data import split_data
-from pre_training import pre_train
+from pre_train import pre_train
+from fn_train import fine_tune
 
 
 def main():
@@ -8,19 +9,34 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
 
     # ---- pre-train ----
-    p_train = sub.add_parser("pre-train", help="Start one or more pre-training runs")
-    p_train.add_argument(
+    p_pt = sub.add_parser("pre-train", help="Start one or more pre-training runs")
+    p_pt.add_argument(
         "configs",
         nargs="+",
         help="One or more BaseConfig subclass names in the config module",
     )
-    p_train.add_argument(
+    p_pt.add_argument(
         "--run-mode",
         default="all",
         choices=["train", "test", "all"],
         help="Run mode: 'train' (training only), 'test' (testing only), or 'all' (both, default)",
     )
-    p_train.set_defaults(func=lambda args: pre_train(args.configs,args.run_mode))
+    p_pt.set_defaults(func=lambda args: pre_train(args.configs, args.run_mode))
+
+    # ---- fine-tune ----
+    p_ft = sub.add_parser("fine-tune", help="Start one or more fine-tuning runs")
+    p_ft.add_argument(
+        "configs",
+        nargs="+",
+        help="One or more BaseConfig subclass names in the config module",
+    )
+    p_ft.add_argument(
+        "--run-mode",
+        default="all",
+        choices=["train", "test", "all"],
+        help="Run mode: 'train' (training only), 'test' (testing only), or 'all' (both, default)",
+    )
+    p_ft.set_defaults(func=lambda args: fine_tune(args.configs, args.run_mode))
 
     # ---- split-data ----
     p_split = sub.add_parser("split", help="Split raw data into train/val/test")

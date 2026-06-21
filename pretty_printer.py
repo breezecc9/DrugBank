@@ -1,9 +1,8 @@
 import os
 import re
 from abc import ABC, abstractmethod
+from turtle import st
 from typing import Any, Generic, Optional, TypeVar
-
-from custom_printer import ptr_color
 
 
 class PtrColor:
@@ -48,7 +47,7 @@ class BaseValue(ABC, Generic[T]):
 
 
 class StringValue(BaseValue[str]):
-    def __init__(self, value: str = "") -> None:
+    def __init__(self, value: str = "--") -> None:
         super().__init__()
         self._value = value
 
@@ -68,7 +67,7 @@ class PlaceholderValue(BaseValue[dict[str, str]]):
         super().__init__()
         self._template = template
         self._placeholders: dict[str, str] = {
-            ph: "" for ph in get_all_placeholder(template)
+            ph: "--" for ph in get_all_placeholder(template)
         }
         self._value = template.format(**self._placeholders)
 
@@ -184,13 +183,13 @@ class PrettyPrinter:
     def next_line(
         self,
     ):
-        return self.add_template(None, StringValue("\n"), ptr_color.info, 2)
+        return self.add_template(None, StringValue("\n"), PtrColor.info, 2)
 
     def split_line(self, length: int = 150, char: str = "-", front=True, back=True):
         if front:
             self.next_line()
         self.add_template(
-            None, StringValue(char * length), ptr_color.info, length * len(char)
+            None, StringValue(char * length), PtrColor.info, length * len(char)
         )
         if back:
             self.next_line()
@@ -212,20 +211,26 @@ class PrettyPrinter:
     def write(
         self,
         key: str,
-        value: str | dict[str, str],
+        value: str | float | int | dict[str, str | float | int],
         color: Optional[str] = None,
         length: Optional[int] = None,
     ):
 
+        if isinstance(value, dict):
+            value = {k: str(v) for k, v in value.items()}
+        else:
+            value = str(value)
         tpl = self._template_dict.get(key)
         if tpl is None:
             raise KeyError(f"不存在key={key}的模板")
+        if isinstance(value, str) and isinstance(tpl._value_template, PlaceholderValue):
+            value = {"value": value}
         tpl.write(value, color, length)
 
     def w_flush(
         self,
         key: str,
-        value: str | dict[str, str],
+        value: str | float | int | dict[str, str | float | int],
         color: Optional[str] = None,
         length: Optional[int] = None,
     ):
@@ -250,10 +255,14 @@ class PrettyPrinter:
     def scroll(
         self,
         key: str,
-        value: str | dict[str, str],
+        value: str | float | int | dict[str, str | float | int],
         color: str | None = None,
         length: int | None = None,
     ):
+        if isinstance(value, dict):
+            value = {k: str(v) for k, v in value.items()}
+        else:
+            value = str(value)
         current_scroll = self._scroll_dict.get(key)
         if current_scroll is None:
             return
@@ -277,7 +286,7 @@ class PrettyPrinter:
     def scl_flush(
         self,
         key: str,
-        value: str | dict[str, str],
+        value: str | float | int | dict[str, str | float | int],
         color: str | None = None,
         length: int | None = None,
     ):
@@ -288,22 +297,30 @@ class PrettyPrinter:
 pt_printer = PrettyPrinter()
 pt_printer.split_line().add_placeholder_template(
     "Name:{value}", key="name"
-).add_placeholder_template("Encoder:{value}", key="encoder").add_placeholder_template(
-    "Classifier:{value}", key="classifier"
-).add_placeholder_template("LR:{value}", key="lr").add_placeholder_template(
+).add_placeholder_template("Stage:{value}", key="stage").add_placeholder_template(
     "Device:{value}", key="device"
+).add_placeholder_template(
+    "Elapsed:{value} s", key="elapsed"
 ).split_line().add_placeholder_template(
     "Epoch:{value}", key="epoch"
-).add_placeholder_template("Elapsed:{value}", key="elapsed").add_placeholder_template(
+).add_placeholder_template("LR:{value}", key="lr").add_placeholder_template(
     "Early Stop:{value}", key="early_stop"
-).add_placeholder_template("State:{value}", key="state").add_placeholder_template(
-    "Stage:{value}", key="stage"
+).add_placeholder_template(
+    "State:{value}", key="state"
 ).split_line().add_string_template("Train:").add_placeholder_template(
-    "Loss:{loss} Acc:{acc}", length=120, key="train"
+    "Batch:{batch} Loss:{loss} Acc:{acc} Elapsed:{elapsed} s", length=120, key="train",color=PtrColor.training
 ).split_line().add_string_template("Last Val:").add_placeholder_template(
-    "Loss:{loss} Acc:{acc} F1:{f1} Prec:{prec} Rec:{rec}", length=120, key="val"
+    "Loss:{loss} Acc:{acc} F1:{f1} AUC:{auc} Prec:{prec} Rec:{rec} Elapsed:{elapsed} s",
+    length=120,
+    key="val",color=PtrColor.validating
 ).split_line().add_string_template("Test:").add_placeholder_template(
-    "Loss:{loss} Acc:{acc} F1:{f1} Prec:{prec} Rec:{rec}", length=120, key="test"
+    "Loss:{loss} Acc:{acc} F1:{f1} AUC:{auc} Prec:{prec} Rec:{rec}",
+    length=120,
+    key="test",color=PtrColor.notice
+).split_line().add_string_template("Best:").add_placeholder_template(
+    "Loss:{loss} Acc:{acc} F1:{f1} AUC:{auc} Prec:{prec} Rec:{rec}",
+    length=120,
+    key="best",color=PtrColor.flag
 ).split_line().add_string_template().add_string_template(length=120).add_scroll(
     "info"
 ).next_line().add_string_template().add_string_template(length=120).add_scroll(

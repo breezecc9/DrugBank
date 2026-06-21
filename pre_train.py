@@ -25,7 +25,7 @@ from process_data import (
 from model import EarlyStop, BClassifier, AttnGINTFEncoder
 from config import BaseConfig
 import config
-from custom_printer import train_ptr as ptr, ptr_color
+from pretty_printer import pt_printer as ptr, PtrColor
 
 
 def _train_one_epoch(
@@ -84,7 +84,12 @@ def _train_one_epoch(
         total_acc += acc.item()
         ptr.w_flush(
             "train",
-            f"[Batch:{batch_counter}/{total_batch}]  Loss:{loss.item():.5f}  Acc:{acc.item():.5f}",
+            {
+                "batch": f"{batch_counter}/{total_batch}",
+                "loss": f"{loss.item():.5f}",
+                "acc": f"{acc.item():.5f}",
+                "elapsed": "--",
+            },
         )
     avg_loss = total_loss / len(itc_loader)
     avg_acc = total_acc / len(itc_loader)
@@ -147,8 +152,6 @@ def _train(
     epochs = cfg.epochs
     seed = cfg.seed
 
-    # torch.autograd.set_detect_anomaly(True)
-
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     random.seed(seed)
@@ -162,7 +165,7 @@ def _train(
 
     os.makedirs(output_root, exist_ok=True)
 
-    model_path = os.path.join(output_root, "pre-trained.pt")
+    model_path = os.path.join(output_root, "pre-train.pt")
     pt_res_path = os.path.join(output_root, "pre-train-metric.csv")
 
     drug_set = DrugDataset(input_root)
@@ -212,21 +215,10 @@ def _train(
     criterion = BCEWithLogitsLoss(reduction="mean")
     early_stop = EarlyStop(patience=cfg.patience, mode="max", min_delta=cfg.min_delta)
     scaler = torch.GradScaler() if torch.cuda.is_available() and cfg.scaler else None
-    ptr.set_value_batch(
-        {
-            "name": task_name,
-            "encoder": type(encoder).__name__,
-            "classifier": type(classifier).__name__,
-            "lr": {"CLR": cfg.lr, "LR": cfg.lr},
-            "device": device,
-            "epoch": f"0/{cfg.epochs}",
-            "elapsed": 0,
-            "early_stop": f"0/{early_stop.patience}",
-            "state": "pending",
-            "stage": "pre-train",
-        }
-    )
-
+    ptr.write("name", cfg.__name__)
+    ptr.write("stage", "pre-train")
+    ptr.write("lr", f"{cfg.lr:.7f}/{cfg.lr:.7f}")
+    ptr.w_flush("device", device)
     result = {
         "train_loss": [],
         "train_acc": [],
@@ -245,7 +237,7 @@ def _train(
         current_epoch = epoch + 1
         ptr.w_flush("epoch", f"{current_epoch}/{epochs}")
         with Timer() as timer:
-            ptr.w_flush("state", "training", ptr_color.training)
+            ptr.w_flush("state", "training", PtrColor.training)
             train_loss, train_acc = _train_one_epoch(
                 encoder,
                 classifier,
@@ -261,7 +253,12 @@ def _train(
         result["train_acc"].append(train_acc)
         ptr.write(
             "train",
-            f"loss={train_loss:.5f}  acc={train_acc:.5f}  ({timer.elapsed:.5f} s)",
+            {
+                "batch": "--",
+                "loss": f"{train_loss:.5f}",
+                "acc": f"{train_acc:.5f}",
+                "elapsed": f"{timer.elapsed:.5f}",
+            },
         )
         ptr.w_flush(
             "elapsed",
@@ -269,7 +266,7 @@ def _train(
         )
 
         with Timer() as timer:
-            ptr.w_flush("state", "valdating", ptr_color.validating)
+            ptr.w_flush("state", "valdating", PtrColor.validating)
             val_loss, val_acc, val_f1, val_auc, val_prec, val_rec = _val_one_epoch(
                 encoder,
                 classifier,
@@ -288,7 +285,15 @@ def _train(
         result["elapsed"].append(total_timer)
         ptr.write(
             "val",
-            f"loss={val_loss:.5f}  acc={val_acc:.5f}  f1_score={val_f1:.5f}  auc={val_auc:.5f}  precision={val_prec:.5f}  recall={val_rec:.5f} ({timer.elapsed:.5f} s)",
+            {
+                "loss": f"{val_loss:.5f}",
+                "acc": f"{val_acc:.5f}",
+                "f1": f"{val_f1:.5f}",
+                "auc": f"{val_auc:.5f}",
+                "prec": f"{val_prec:.5f}",
+                "rec": f"{val_rec:.5f}",
+                "elapsed": f"{timer.elapsed:.5f}",
+            },
         )
         ptr.write(
             "elapsed",
@@ -297,10 +302,8 @@ def _train(
 
         scheduler.step()
         is_improved = early_stop(val_auc)
-        ptr.write("state", "waiting", ptr_color.pending)
-        ptr.w_flush(
-            "lr", {"CLR": f"{optimizer.param_groups[0]['lr']:.7f}", "LR": cfg.lr}
-        )
+        ptr.write("state", "waiting", PtrColor.pending)
+        ptr.w_flush("lr", f"{optimizer.param_groups[0]['lr']:.7f}/{cfg.lr:.7f}")
         if is_improved:
             torch.save(
                 {
@@ -313,49 +316,61 @@ def _train(
             ptr.write(
                 "early_stop",
                 f"{early_stop.counter}/{early_stop.patience}",
-                ptr_color.info,
-            )
-            ptr.scroll(
-                "info",
-                f"[{current_epoch}/{epochs}] Model performance improved",
-                ptr_color.notice,
+                PtrColor.info,
             )
             ptr.write(
                 "best",
-                f"[{current_epoch}/{epochs}] loss={val_loss:.5f}  acc={val_acc:.5f}  f1_score={val_f1:.5f}  auc={val_auc:.5f}  precision={val_prec:.5f}  recall={val_rec:.5f}  ({timer.elapsed:.5f} s)",
-                ptr_color.pending,
+                {
+                    "loss": f"{val_loss:.5f}",
+                    "acc": f"{val_acc:.5f}",
+                    "f1": f"{val_f1:.5f}",
+                    "auc": f"{val_auc:.5f}",
+                    "prec": f"{val_prec:.5f}",
+                    "rec": f"{val_rec:.5f}",
+                },
+                PtrColor.pending,
+            )
+            ptr.scroll(
+                "info",
+                f"[Epoch {current_epoch}/{epochs}] new best model saved to {model_path}",
+                PtrColor.flag,
             )
             ptr.scl_flush(
                 "info",
-                f"[{current_epoch}/{epochs}] best model improved → saved best.pt and evaluate.csv",
-                ptr_color.notice,
+                f"[Epoch {current_epoch}/{epochs}] val metric saved to {pt_res_path}",
+                PtrColor.flag,
             )
         else:
             ptr.scroll(
                 "info",
-                f"[{current_epoch}/{epochs}] Model performance not improved",
-                ptr_color.warning,
+                f"[{current_epoch}/{epochs}] performance not improved",
+                PtrColor.warning,
             )
             ptr.w_flush(
                 "early_stop",
                 f"{early_stop.counter}/{early_stop.patience}",
-                ptr_color.warning,
+                PtrColor.warning,
             )
 
         if early_stop.early_stop:
             ptr.write(
                 "early_stop",
                 f"{early_stop.counter}/{early_stop.patience}",
-                ptr_color.error,
+                PtrColor.error,
             )
             ptr.scroll(
                 "info",
-                f"[{current_epoch}/{epochs}] Early stopping triggered",
-                ptr_color.warning,
+                f"[{current_epoch}/{epochs}] early stopping triggered",
+                PtrColor.error,
             )
-            ptr.w_flush("state", "finished", ptr_color.done)
+            ptr.w_flush("state", "finished", PtrColor.done)
             break
     pd.DataFrame(result).to_csv(pt_res_path, index=False)
+    ptr.scl_flush(
+        "info",
+        f"{task_name} pre-train already completed",
+        PtrColor.notice,
+    )
 
 
 def _test(cfg: BaseConfig):
@@ -396,12 +411,19 @@ def _test(cfg: BaseConfig):
 
     base_dir = os.path.join("./task", task_name)
     best_path = os.path.join(base_dir, "pre-trained.pt")
-    eval_path = os.path.join(base_dir, "eval.csv")
+    eval_path = os.path.join(base_dir, "pre-trained-eval.csv")
+
+    ptr.write("name", cfg.__name__)
+    ptr.write("stage", "pre-train")
+    ptr.write("state", "test", PtrColor.flag)
+    ptr.w_flush("device", device)
 
     if not os.path.exists(best_path):
+        ptr.w_flush("info", f"best_path: {best_path} not existed")
         return
 
     best_model = torch.load(best_path, weights_only=False)
+    ptr.scl_flush("info", f"loaded best model from:{best_path}")
 
     encoder.load_state_dict(best_model["encoder"])
     classifier.load_state_dict(best_model["classifier"])
@@ -414,9 +436,22 @@ def _test(cfg: BaseConfig):
         criterion,
         device,
     )
+    ptr.w_flush(
+        "test",
+        {
+            "loss": f"{loss:.5f}",
+            "acc": f"{acc:.5f}",
+            "f1": f"{f1:.5f}",
+            "auc": f"{auc:.5f}",
+            "prec": f"{prec:.5f}",
+            "rec": f"{rec:.5f}",
+        },
+    )
     pd.DataFrame(
-        {"loss": loss, "acc": acc, "f1": f1, "auc": auc, "prec": prec, "rec": rec},index=[0]
+        {"loss": loss, "acc": acc, "f1": f1, "auc": auc, "prec": prec, "rec": rec},
+        index=[0],
     ).to_csv(eval_path, index=False)
+    ptr.scl_flush("info", f"eval data saved to {eval_path}", color=PtrColor.flag)
 
 
 def pre_train(configs: list[str], mode: Literal["train", "test", "all"]):

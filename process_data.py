@@ -125,7 +125,7 @@ def _split_drugbank_random(df: pd.DataFrame, ratio_tuple, seed, save_dir):
     itc.columns = ["drug1", "drug2", "label"]
     itc["drug1"] = itc["drug1"].map(id_map)
     itc["drug2"] = itc["drug2"].map(id_map)
-    itc["label"] = itc["label"] - 1
+    itc["label"] = itc["label"]
     unique_pairs = set()
     unique_itc = {"drug1": [], "drug2": [], "label": []}
     for d1, d2, label in zip(itc["drug1"], itc["drug2"], itc["label"]):
@@ -723,6 +723,66 @@ def sample_pre_train_neg(
     train.to_csv(os.path.join(base_dir, "train-pre-train-itc.csv"), index=False)
     val.to_csv(os.path.join(base_dir, "val-pre-train-itc.csv"), index=False)
     test.to_csv(os.path.join(base_dir, "test-pre-train-itc.csv"), index=False)
+    print(
+        f"数据集生成完成：训练集{len(train)}条，验证集{len(val)}条，测试集{len(test)}条"
+    )
+
+
+def sample_fine_tuning_neg(split_type, seed=42, sim_threshold=0.7):
+    base_dir = os.path.join("./split-data", split_type + "-" + str(seed), "raw")
+    drugs = pd.read_csv(os.path.join(base_dir, "drug.csv"))
+    all_itc = pd.read_csv(os.path.join(base_dir, "all-itc.csv"))
+    train_itc = pd.read_csv(os.path.join(base_dir, "train-itc.csv"))
+    val_itc = pd.read_csv(os.path.join(base_dir, "val-itc.csv"))
+    test_itc = pd.read_csv(os.path.join(base_dir, "test-itc.csv"))
+    drug_dict = {i: s for i, s in zip(drugs["id"], drugs["smile"])}
+
+    all_pairs = get_all_pairs(list(drug_dict.keys()))
+
+    all_pos_pairs = {
+        tuple(sorted((d1, d2))) for d1, d2 in zip(all_itc["drug1"], all_itc["drug2"])
+    }
+
+    all_neg_pairs = all_pairs - all_pos_pairs
+
+    fp_dict = generate_fp(drug_dict)
+    fn_filted_neg_pairs = filte_false_neg(fp_dict, all_neg_pairs, sim_threshold)
+
+    train_neg_pairs = sample_random_neg(fn_filted_neg_pairs, len(train_itc), seed)
+
+    rest_neg_pairs = fn_filted_neg_pairs - train_neg_pairs
+
+    val_neg_pairs = sample_random_neg(rest_neg_pairs, len(val_itc), seed)
+
+    rest_neg_pairs = rest_neg_pairs - val_neg_pairs
+
+    test_neg_pairs = sample_random_neg(rest_neg_pairs, len(test_itc), seed)
+
+    train_neg = pd.DataFrame(
+        list(train_neg_pairs),
+        columns=["drug1", "drug2"],
+    )
+
+    val_neg = pd.DataFrame(
+        list(val_neg_pairs),
+        columns=["drug1", "drug2"],
+    )
+
+    test_neg = pd.DataFrame(
+        list(test_neg_pairs),
+        columns=["drug1", "drug2"],
+    )
+
+    train_neg["label"] = 0
+    val_neg["label"] = 0
+    test_neg["label"] = 0
+
+    train = pd.concat([train_itc, train_neg], axis=0, ignore_index=True)
+    val = pd.concat([val_itc, val_neg], axis=0, ignore_index=True)
+    test = pd.concat([test_itc, test_neg], axis=0, ignore_index=True)
+    train.to_csv(os.path.join(base_dir, "train-fine-tune-itc.csv"), index=False)
+    val.to_csv(os.path.join(base_dir, "val-fine-tune-itc.csv"), index=False)
+    test.to_csv(os.path.join(base_dir, "test-fine-tune-itc.csv"), index=False)
     print(
         f"数据集生成完成：训练集{len(train)}条，验证集{len(val)}条，测试集{len(test)}条"
     )
