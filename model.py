@@ -250,8 +250,6 @@ class MClassifier(nn.Module):
 
         self.d_model = d_model
         self.class_num = class_num
-        self.drug1_proj = nn.Linear(d_model, d_model)
-        self.drug2_proj = nn.Linear(d_model, d_model)
         self.mlp = nn.Sequential(
             nn.Linear(d_model * 4, d_model * 2),
             nn.BatchNorm1d(d_model * 2),
@@ -263,8 +261,6 @@ class MClassifier(nn.Module):
         )
 
     def forward(self, d1, d2):
-        d1 = self.drug1_proj(d1)
-        d2 = self.drug2_proj(d2)
         x = torch.cat([d1, d2, torch.abs(d1 - d2), d1 * d2], dim=-1)
         return self.mlp(x)
 

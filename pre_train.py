@@ -1,6 +1,4 @@
 import os
-import random
-from typing import Literal
 import pandas as pd
 from sklearn.metrics import (
     accuracy_score,
@@ -9,10 +7,6 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.nn import BCEWithLogitsLoss
-import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from process_data import (
@@ -36,7 +30,6 @@ def _train_one_epoch(
     optimizer,
     criterion,
     device,
-    scaler=None,
 ):
 
     encoder.train()
@@ -51,30 +44,13 @@ def _train_one_epoch(
         d1, d2, labels = d1.to(device), d2.to(device), labels.to(device)
 
         optimizer.zero_grad()
-        if scaler is not None:
-            with torch.autocast(device_type="cuda"):
-                all_drugs = torch.cat(
-                    [encoder(drugs.to(device)) for drugs in drug_loader]
-                )
-                logits = classifier(all_drugs[d1], all_drugs[d2])
-                logits = logits.squeeze(-1)
-                logits = torch.clamp(logits, min=-8.0, max=8.0)
-                loss = criterion(logits, labels.float())
 
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(
-                list(encoder.parameters()) + list(classifier.parameters()), max_norm=1.0
-            )
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            all_drugs = torch.cat([encoder(drugs.to(device)) for drugs in drug_loader])
-            logits = classifier(all_drugs[d1], all_drugs[d2])
-            logits = logits.squeeze(-1)
-            loss = criterion(logits, labels.float())
-            loss.backward()
-            optimizer.step()
+        all_drugs = torch.cat([encoder(drugs.to(device)) for drugs in drug_loader])
+        logits = classifier(all_drugs[d1], all_drugs[d2])
+        logits = logits.squeeze(-1)
+        loss = criterion(logits, labels.float())
+        loss.backward()
+        optimizer.step()
 
         prob = torch.sigmoid(logits)
         preds = (prob > 0.5).long()
@@ -150,23 +126,22 @@ def _train(
 
     task_name = cfg.__name__
     epochs = cfg.epochs
-    seed = cfg.seed
-
+    lr = cfg.lr
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if device == "cuda":
-        torch.cuda.manual_seed_all(seed)
+    ptr.write("name", task_name)
+    ptr.write("stage", "pre-train")
+    ptr.write("lr", f"{lr:.7f}/{lr:.7f}")
+    ptr.write("state", "waiting", PtrColor.pending)
+    ptr.w_flush("device", device)
 
-    input_root = os.path.join("./split-data", cfg.split_type + "-" + str(seed))
+    input_root = os.path.join("./split-data", cfg.split_type + "-" + str(cfg.seed))
     output_root = os.path.join("./task", task_name)
-
-    os.makedirs(output_root, exist_ok=True)
 
     model_path = os.path.join(output_root, "pre-train.pt")
     pt_res_path = os.path.join(output_root, "pre-train-metric.csv")
+
+    os.makedirs(output_root, exist_ok=True)
 
     drug_set = DrugDataset(input_root)
     train_itc = InteractionDataset(input_root, "train", "pre-train")
@@ -206,19 +181,17 @@ def _train(
     ).to(device)
 
     classifier = BClassifier(cfg.d_model, cfg.dp_r).to(device)
-    optimizer = AdamW(
+    optimizer = torch.optim.AdamW(
         list(encoder.parameters()) + list(classifier.parameters()),
-        lr=cfg.lr,
+        lr=lr,
         weight_decay=cfg.weight_decay,
     )
-    scheduler = CosineAnnealingLR(optimizer, epochs, eta_min=0.00001)
-    criterion = BCEWithLogitsLoss(reduction="mean")
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, epochs, eta_min=0.00001
+    )
+    criterion = torch.nn.BCEWithLogitsLoss(reduction="mean")
     early_stop = EarlyStop(patience=cfg.patience, mode="max", min_delta=cfg.min_delta)
-    scaler = torch.GradScaler() if torch.cuda.is_available() and cfg.scaler else None
-    ptr.write("name", cfg.__name__)
-    ptr.write("stage", "pre-train")
-    ptr.write("lr", f"{cfg.lr:.7f}/{cfg.lr:.7f}")
-    ptr.w_flush("device", device)
+
     result = {
         "train_loss": [],
         "train_acc": [],
@@ -246,7 +219,6 @@ def _train(
                 optimizer,
                 criterion,
                 device,
-                scaler,
             )
         total_timer += timer.elapsed
         result["train_loss"].append(train_loss)
@@ -299,11 +271,10 @@ def _train(
             "elapsed",
             f"{total_timer:.5f}",
         )
-
+        ptr.write("state", "waiting", PtrColor.pending)
         scheduler.step()
         is_improved = early_stop(val_auc)
-        ptr.write("state", "waiting", PtrColor.pending)
-        ptr.w_flush("lr", f"{optimizer.param_groups[0]['lr']:.7f}/{cfg.lr:.7f}")
+        ptr.w_flush("lr", f"{optimizer.param_groups[0]['lr']:.7f}/{lr:.7f}")
         if is_improved:
             torch.save(
                 {
@@ -330,14 +301,9 @@ def _train(
                 },
                 PtrColor.pending,
             )
-            ptr.scroll(
-                "info",
-                f"[Epoch {current_epoch}/{epochs}] new best model saved to {model_path}",
-                PtrColor.flag,
-            )
             ptr.scl_flush(
                 "info",
-                f"[Epoch {current_epoch}/{epochs}] val metric saved to {pt_res_path}",
+                f"[Epoch {current_epoch}/{epochs}] new best model saved to {model_path}",
                 PtrColor.flag,
             )
         else:
@@ -363,9 +329,14 @@ def _train(
                 f"[{current_epoch}/{epochs}] early stopping triggered",
                 PtrColor.error,
             )
-            ptr.w_flush("state", "finished", PtrColor.done)
+            ptr.w_flush("state", "done", PtrColor.done)
             break
     pd.DataFrame(result).to_csv(pt_res_path, index=False)
+    ptr.scroll(
+        "info",
+        f"val metric saved to {pt_res_path}",
+        PtrColor.flag,
+    )
     ptr.scl_flush(
         "info",
         f"{task_name} pre-train already completed",
@@ -378,6 +349,22 @@ def _test(cfg: BaseConfig):
     task_name = cfg.__name__
     device = "cuda" if torch.cuda.is_available() else "cpu"
     root = os.path.join("./split-data", cfg.split_type + "-" + str(cfg.seed))
+
+    base_dir = os.path.join("./task", task_name)
+    best_path = os.path.join(base_dir, "pre-train.pt")
+    eval_path = os.path.join(base_dir, "pre-train-eval.csv")
+
+    if not os.path.exists(best_path):
+        ptr.scl_flush("info", f"best_path: {best_path} not existed")
+        return
+
+    best_model = torch.load(best_path, weights_only=False)
+    ptr.scl_flush("info", f"loaded best model from:{best_path}")
+
+    ptr.write("name", task_name)
+    ptr.write("stage", "pre-train")
+    ptr.write("state", "test", PtrColor.flag)
+    ptr.w_flush("device", device)
 
     drug_set = DrugDataset(root)
     test_itc = InteractionDataset(root, "test", "pre-train")
@@ -407,23 +394,7 @@ def _test(cfg: BaseConfig):
         cfg.heads,
     ).to(device)
     classifier = BClassifier(cfg.d_model, cfg.dp_r).to(device)
-    criterion = BCEWithLogitsLoss(reduction="mean")
-
-    base_dir = os.path.join("./task", task_name)
-    best_path = os.path.join(base_dir, "pre-trained.pt")
-    eval_path = os.path.join(base_dir, "pre-trained-eval.csv")
-
-    ptr.write("name", cfg.__name__)
-    ptr.write("stage", "pre-train")
-    ptr.write("state", "test", PtrColor.flag)
-    ptr.w_flush("device", device)
-
-    if not os.path.exists(best_path):
-        ptr.w_flush("info", f"best_path: {best_path} not existed")
-        return
-
-    best_model = torch.load(best_path, weights_only=False)
-    ptr.scl_flush("info", f"loaded best model from:{best_path}")
+    criterion = torch.nn.BCEWithLogitsLoss(reduction="mean")
 
     encoder.load_state_dict(best_model["encoder"])
     classifier.load_state_dict(best_model["classifier"])
@@ -454,12 +425,10 @@ def _test(cfg: BaseConfig):
     ptr.scl_flush("info", f"eval data saved to {eval_path}", color=PtrColor.flag)
 
 
-def pre_train(configs: list[str], mode: Literal["train", "test", "all"]):
+def pre_train(configs: list[str]):
     for cfg in configs:
-        if mode in ("train", "all"):
-            _train(getattr(config, cfg))
-        if mode in ("test", "all"):
-            _test(getattr(config, cfg))
+        _train(getattr(config, cfg))
+        _test(getattr(config, cfg))
 
 
 __all__ = ["pre_train"]

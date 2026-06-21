@@ -1,8 +1,5 @@
 import os
-import random
-from typing import Literal
 import config
-import numpy as np
 import pandas as pd
 from sklearn.metrics import (
     accuracy_score,
@@ -14,9 +11,6 @@ from sklearn.metrics import (
 import torch
 from torch.utils.data import DataLoader
 from model import EarlyStop, MClassifier, AttnGINTFEncoder
-from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.nn import CrossEntropyLoss
-from torch.optim import AdamW
 from config import BaseConfig
 from process_data import (
     DrugDataset,
@@ -36,42 +30,27 @@ def _train_one_epoch(
     optimizer,
     criterion,
     device,
-    scaler=None,
 ):
-
-    encoder.train()
+    encoder.eval()
     classifier.train()
     total_batch = len(itc_loader)
     total_loss = 0.0
     total_acc = 0.0
     batch_counter = 0
+
+    with torch.no_grad():
+        all_drugs = torch.cat([encoder(drugs.to(device)) for drugs in drug_loader])
+
     for d1, d2, labels in itc_loader:
         batch_counter += 1
         d1, d2, labels = d1.to(device), d2.to(device), labels.to(device)
 
         optimizer.zero_grad()
-        if scaler is not None:
-            with torch.autocast(device_type="cuda"):
-                all_drugs = torch.cat(
-                    [encoder(drugs.to(device)) for drugs in drug_loader]
-                )
-                logits = classifier(all_drugs[d1], all_drugs[d2])
-                logits = torch.clamp(logits, min=-8.0, max=8.0)
-                loss = criterion(logits, labels)
-
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(
-                list(encoder.parameters()) + list(classifier.parameters()), max_norm=1.0
-            )
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            all_drugs = torch.cat([encoder(drugs.to(device)) for drugs in drug_loader])
-            logits = classifier(all_drugs[d1], all_drugs[d2])
-            loss = criterion(logits, labels)
-            loss.backward()
-            optimizer.step()
+        # all_drugs = torch.cat([encoder(drugs.to(device)) for drugs in drug_loader])
+        logits = classifier(all_drugs[d1], all_drugs[d2])
+        loss = criterion(logits, labels)
+        loss.backward()
+        optimizer.step()
 
         preds = torch.argmax(logits, dim=-1)
         acc = (preds == labels).float().mean()
@@ -116,7 +95,6 @@ def _val_one_epoch(
             d1, d2, labels = d1.to(device), d2.to(device), labels.to(device)
 
             logits = classifier(all_drugs[d1], all_drugs[d2])
-            logits = torch.clamp(logits, min=-8.0, max=8.0)
             loss = criterion(logits, labels)
 
             prob = torch.softmax(logits, dim=-1)
@@ -145,31 +123,37 @@ def _train(cfg: BaseConfig):
 
     task_name = cfg.__name__
     epochs = cfg.epochs
-    seed = cfg.seed
-    lr = cfg.lr / 10
-
+    # lr = cfg.lr / 10
+    lr = cfg.lr
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    input_root = os.path.join("./split-data", cfg.split_type + "-" + str(seed))
+    ptr.write("name", task_name)
+    ptr.write("stage", "fine-tune")
+    ptr.write("lr", f"{lr:.7f}/{lr:.7f}")
+    ptr.write("state", "waiting", PtrColor.pending)
+    ptr.w_flush("device", device)
+
+    input_root = os.path.join("./split-data", cfg.split_type + "-" + str(cfg.seed))
     output_root = os.path.join("./task", task_name)
-
-    os.makedirs(output_root, exist_ok=True)
-    pre_train_model_path = os.path.join(output_root, "pre-train.pt")
-
-    if not os.path.exists(pre_train_model_path):
-        ptr.scl_flush(
-            "info", f"Failed to load pre-trained model from: {pre_train_model_path}"
-        )
-        return
 
     model_path = os.path.join(output_root, "fine-tune.pt")
     ft_res_path = os.path.join(output_root, "fine-tune-metric.csv")
 
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if device == "cuda":
-        torch.cuda.manual_seed_all(seed)
+    pre_train_model_path = os.path.join(output_root, "pre-train.pt")
+    os.makedirs(output_root, exist_ok=True)
+
+    if not os.path.exists(pre_train_model_path):
+        ptr.scl_flush(
+            "info",
+            f"Failed to load pre-trained model weights from: {pre_train_model_path}",
+        )
+        return
+
+    pt_weights = torch.load(pre_train_model_path, weights_only=False)
+
+    ptr.scl_flush(
+        "info", f"loaded pre-trained model weights from: {pre_train_model_path}"
+    )
 
     drug_set = DrugDataset(input_root)
     train_itc = InteractionDataset(input_root, "train", "fine-tune")
@@ -206,17 +190,24 @@ def _train(cfg: BaseConfig):
         cfg.block_num,
         cfg.dp_r,
         cfg.heads,
-    )
+    ).to(device)
+
+    encoder.load_state_dict(pt_weights["encoder"])
+
+    for param in encoder.parameters():
+        param.requires_grad = False
+
     classifier = MClassifier(cfg.d_model, cfg.class_num, cfg.dp_r).to(device)
-    optimizer = AdamW(
-        list(encoder.parameters()) + list(classifier.parameters()),
+    optimizer = torch.optim.AdamW(
+        list(classifier.parameters()),
         lr=lr,
         weight_decay=cfg.weight_decay,
     )
-    scheduler = CosineAnnealingLR(optimizer, epochs, eta_min=0.00001)
-    criterion = CrossEntropyLoss(label_smoothing=cfg.label_smoothing)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, epochs, eta_min=0.00001
+    )
+    criterion = torch.nn.CrossEntropyLoss(label_smoothing=cfg.label_smoothing)
     early_stop = EarlyStop(patience=cfg.patience, mode="max", min_delta=cfg.min_delta)
-    scaler = torch.GradScaler() if torch.cuda.is_available() and cfg.scaler else None
 
     result = {
         "train_loss": [],
@@ -232,15 +223,11 @@ def _train(cfg: BaseConfig):
 
     total_timer = 0
 
-    ptr.write("name", cfg.__name__)
-    ptr.write("stage", "fine-tune")
-    ptr.write("lr", f"{lr:.7f}/{lr:.7f}")
-    ptr.w_flush("device", device)
-
     for epoch in range(0, epochs):
         current_epoch = epoch + 1
-
+        ptr.w_flush("epoch", f"{current_epoch}/{epochs}")
         with Timer() as timer:
+            ptr.w_flush("state", "training", PtrColor.training)
             train_loss, train_acc = _train_one_epoch(
                 encoder,
                 classifier,
@@ -249,7 +236,6 @@ def _train(cfg: BaseConfig):
                 optimizer,
                 criterion,
                 device,
-                scaler,
             )
         total_timer += timer.elapsed
         result["train_loss"].append(train_loss)
@@ -268,6 +254,7 @@ def _train(cfg: BaseConfig):
             f"{total_timer:.5f}",
         )
         with Timer() as timer:
+            ptr.w_flush("state", "valdating", PtrColor.validating)
             val_loss, val_acc, val_f1, val_auc, val_prec, val_rec = _val_one_epoch(
                 encoder,
                 classifier,
@@ -300,9 +287,9 @@ def _train(cfg: BaseConfig):
             "elapsed",
             f"{total_timer:.5f}",
         )
+        ptr.write("state", "waiting", PtrColor.pending)
         scheduler.step()
         is_improved = early_stop(val_f1)
-        ptr.write("state", "waiting", PtrColor.pending)
         ptr.w_flush("lr", f"{optimizer.param_groups[0]['lr']:.7f}/{lr:.7f}")
         if is_improved:
             torch.save(
@@ -330,14 +317,9 @@ def _train(cfg: BaseConfig):
                 },
                 PtrColor.pending,
             )
-            ptr.scroll(
-                "info",
-                f"[Epoch {current_epoch}/{epochs}] new best model saved to {model_path}",
-                PtrColor.flag,
-            )
             ptr.scl_flush(
                 "info",
-                f"[Epoch {current_epoch}/{epochs}] val metric saved to {ft_res_path}",
+                f"[Epoch {current_epoch}/{epochs}] new best model saved to {model_path}",
                 PtrColor.flag,
             )
         else:
@@ -363,9 +345,14 @@ def _train(cfg: BaseConfig):
                 f"[{current_epoch}/{epochs}] early stopping triggered",
                 PtrColor.error,
             )
-            ptr.w_flush("state", "finished", PtrColor.done)
+            ptr.w_flush("state", "done", PtrColor.done)
             break
     pd.DataFrame(result).to_csv(ft_res_path, index=False)
+    ptr.scroll(
+        "info",
+        f"{task_name} fine-tune already completed",
+        PtrColor.notice,
+    )
     ptr.scl_flush(
         "info",
         f"{task_name} fine-tune already completed",
@@ -378,6 +365,10 @@ def _test(cfg: BaseConfig):
     task_name = cfg.__name__
     device = "cuda" if torch.cuda.is_available() else "cpu"
     root = os.path.join("./split-data", cfg.split_type + "-" + str(cfg.seed))
+
+    base_dir = os.path.join("./task", task_name)
+    best_path = os.path.join(base_dir, "fine-tuned.pt")
+    eval_path = os.path.join(base_dir, "fine-tuned-eval.csv")
 
     drug_set = DrugDataset(root)
     test_itc = InteractionDataset(root, "test", "fine-tune")
@@ -409,11 +400,7 @@ def _test(cfg: BaseConfig):
     classifier = MClassifier(cfg.d_model, class_num=cfg.class_num, dp_r=cfg.dp_r).to(
         device
     )
-    criterion = CrossEntropyLoss(label_smoothing=cfg.label_smoothing)
-
-    base_dir = os.path.join("./task", task_name)
-    best_path = os.path.join(base_dir, "fine-tuned.pt")
-    eval_path = os.path.join(base_dir, "fine-tuned-eval.csv")
+    criterion = torch.nn.CrossEntropyLoss(label_smoothing=cfg.label_smoothing)
 
     ptr.write("name", cfg.__name__)
     ptr.write("stage", "fine-tune")
@@ -421,7 +408,7 @@ def _test(cfg: BaseConfig):
     ptr.w_flush("device", device)
 
     if not os.path.exists(best_path):
-        ptr.w_flush("info", f"best_path: {best_path} not existed")
+        ptr.scl_flush("info", f"best_path: {best_path} not existed")
         return
 
     best_model = torch.load(best_path, weights_only=False)
@@ -456,12 +443,10 @@ def _test(cfg: BaseConfig):
     ptr.scl_flush("info", f"eval data saved to {eval_path}", color=PtrColor.flag)
 
 
-def fine_tune(configs: list[str], mode: Literal["train", "test", "all"]):
+def fine_tune(configs: list[str]):
     for cfg in configs:
-        if mode in ("train", "all"):
-            _train(getattr(config, cfg))
-        if mode in ("test", "all"):
-            _test(getattr(config, cfg))
+        _train(getattr(config, cfg))
+        _test(getattr(config, cfg))
 
 
 __all__ = ["fine_tune"]

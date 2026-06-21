@@ -21,7 +21,7 @@ class default(BaseConfig):
     num_workers = 0
 
     label_smoothing = 0.1
-    class_num = 2
+    class_num = 87
 
     scaler = False
 

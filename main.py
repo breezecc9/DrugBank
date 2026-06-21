@@ -8,35 +8,23 @@ def main():
     parser = argparse.ArgumentParser(description="Drug-Drug Interaction Prediction")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    # ---- pre-train ----
-    p_pt = sub.add_parser("pre-train", help="Start one or more pre-training runs")
-    p_pt.add_argument(
+    # ---- train ----
+    p_train = sub.add_parser(
+        "train", help="Start training (pre-training, fine-tuning, or both)"
+    )
+    p_train.add_argument(
+        "-m",
+        "--run-mode",
+        default="all",
+        choices=["pre-train", "fine-tune", "all"],
+        help="run pre-training or fine-tuning or both (default: 'all')",
+    )
+    p_train.add_argument(
         "configs",
         nargs="+",
         help="One or more BaseConfig subclass names in the config module",
     )
-    p_pt.add_argument(
-        "--run-mode",
-        default="all",
-        choices=["train", "test", "all"],
-        help="Run mode: 'train' (training only), 'test' (testing only), or 'all' (both, default)",
-    )
-    p_pt.set_defaults(func=lambda args: pre_train(args.configs, args.run_mode))
-
-    # ---- fine-tune ----
-    p_ft = sub.add_parser("fine-tune", help="Start one or more fine-tuning runs")
-    p_ft.add_argument(
-        "configs",
-        nargs="+",
-        help="One or more BaseConfig subclass names in the config module",
-    )
-    p_ft.add_argument(
-        "--run-mode",
-        default="all",
-        choices=["train", "test", "all"],
-        help="Run mode: 'train' (training only), 'test' (testing only), or 'all' (both, default)",
-    )
-    p_ft.set_defaults(func=lambda args: fine_tune(args.configs, args.run_mode))
+    p_train.set_defaults(func=lambda args: train(args))
 
     # ---- split-data ----
     p_split = sub.add_parser("split", help="Split raw data into train/val/test")
@@ -68,6 +56,16 @@ def main():
 
     args = parser.parse_args()
     args.func(args)
+
+
+def train(args):
+    configs = args.configs
+    mode = args.run_mode
+
+    if mode in ("pre-train", "all"):
+        pre_train(configs)
+    elif mode in ("fine-tune", "all"):
+        fine_tune(configs)
 
 
 if __name__ == "__main__":
